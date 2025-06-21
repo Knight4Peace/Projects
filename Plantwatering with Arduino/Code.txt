@@ -1,0 +1,121 @@
+#include <SoftwareSerial.h>
+
+SoftwareSerial espSerial(2, 3); // RX, TX
+
+const int pumpPin = 12;
+const int moisturePins[] = {A0, A1, A2, A3, A4, A5};
+const int threshold = 400; // Schwellenwert für Feuchtigkeit
+
+unsigned long lastWateringTime = 0;
+const unsigned long wateringInterval = 6 * 60 * 60; // 6 Stunden in Sekunden
+bool thresholdCrossed = false;
+
+void setup() {
+  Serial.begin(115200);
+  espSerial.begin(115200);
+  
+  pinMode(pumpPin, OUTPUT);
+  digitalWrite(pumpPin, LOW);
+
+  Serial.println("Setup complete.");
+}
+
+void loop() {
+  checkMoisture();
+  checkForManualCommand();
+  delay(5000); // 5 Sekunden Pause zwischen den Überprüfungen
+}
+
+void checkMoisture() {
+  Serial.println("Starting moisture check...");
+  
+  int totalMoisture = 0;
+  for (int i = 0; i < 6; i++) {
+    Serial.print("Reading moisture sensor ");
+    Serial.println(i);
+    int moistureValue = analogRead(moisturePins[i]);
+    Serial.print("Moisture Sensor ");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.println(moistureValue);
+    totalMoisture += moistureValue;
+
+    // Daten an ESP01 senden
+    espSerial.print("Moisture_Sensor_");
+    espSerial.print(i);
+    espSerial.print(":");
+    espSerial.println(moistureValue);
+  }
+  
+  int averageMoisture = totalMoisture / 6;
+  Serial.print("Average Moisture: ");
+  Serial.println(averageMoisture);
+
+  espSerial.print("Average_Moisture:");
+  espSerial.println(averageMoisture);
+
+  if (averageMoisture > threshold) { // Geändert zu ">"
+    thresholdCrossed = true;
+    checkAndActivatePump();
+  } else {
+    thresholdCrossed = false;
+    Serial.println("Average moisture level below threshold.");
+  }
+
+  if (thresholdCrossed) {
+    checkWateringInterval();
+  }
+}
+
+void checkAndActivatePump() {
+  Serial.println("Threshold crossed. Activating pump immediately.");
+  activatePump();
+  lastWateringTime = millis() / 1000; // Set the last watering time to now in seconds
+}
+
+void checkWateringInterval() {
+  unsigned long currentSeconds = millis() / 1000; // Convert milliseconds to seconds
+  unsigned long timeSinceLastWatering = currentSeconds - lastWateringTime;
+  bool isIntervalReached = timeSinceLastWatering >= wateringInterval;
+
+  if (isIntervalReached) {
+    Serial.println("Watering interval reached after threshold was crossed. Activating pump again...");
+    activatePump();
+    lastWateringTime = currentSeconds;
+  } else {
+    unsigned long timeRemaining = wateringInterval - timeSinceLastWatering;
+    
+    // Convert time remaining to hours, minutes, and seconds
+    unsigned long hoursRemaining = timeRemaining / 3600;
+    unsigned long minutesRemaining = (timeRemaining % 3600) / 60;
+    unsigned long secondsRemaining = timeRemaining % 60;
+
+    Serial.print("Watering interval not reached. Time remaining: ");
+    Serial.print(hoursRemaining);
+    Serial.print("h ");
+    Serial.print(minutesRemaining);
+    Serial.print("m ");
+    Serial.print(secondsRemaining);
+    Serial.println("s");
+  }
+}
+
+void activatePump() {
+  digitalWrite(pumpPin, HIGH);
+  Serial.println("Pump activated.");
+  espSerial.println("PUMP_ACTIVATED");
+  delay(30000); // 30 Sekunden Bewässerung
+  digitalWrite(pumpPin, LOW);
+  Serial.println("Pump deactivated.");
+  espSerial.println("PUMP_DEACTIVATED");
+}
+
+void checkForManualCommand() {
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    if (command == "start_pump") {
+      Serial.println("Manual command received: start_pump");
+      activatePump();
+    }
+  }
+}
