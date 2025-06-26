@@ -1,1 +1,1 @@
-
+I enjoyed making a lil Watering Project for my balcony plant, since i lost couple plants once i went a week away. There do exist some prebuild once, but since i like Coding and know Electric i wanted to make it myself. This is what i came up with and do happily share it with everyone that is interested in it. 
