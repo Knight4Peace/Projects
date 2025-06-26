@@ -1,121 +1,171 @@
-#include <SoftwareSerial.h>
+/********* Inkludieren der Bibliotheken *********/
+#include <WiFiS3.h>
+#include <WiFiClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_LEDBackpack.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <TimeLib.h>
 
-SoftwareSerial espSerial(2, 3); // RX, TX
+/********* WiFi-Konfiguration *********/
+const char* ssid = "<WLAN-NAME>";
+const char* password = "<WLAN-PASSWORD";
 
+/********* Zabbix-Konfiguration *********/
+const char* zabbixServer = "<IP-ADRESS-FROM-ZABBIX-SERVER>";
+const uint16_t zabbixPort = 10051;      #Port on which Zabbix is listening
+const char* zabbixHost = "<NAME-REFERING-ZABBIX-HOST>";
+
+/********* Hardware-Konfiguration *********/
 const int pumpPin = 12;
 const int moisturePins[] = {A0, A1, A2, A3, A4, A5};
-const int threshold = 400; // Schwellenwert für Feuchtigkeit
+const int numSensors = sizeof(moisturePins) / sizeof(moisturePins[0]);
+const int dryThreshold = 315;  
+const int wetThreshold = 250;
 
-unsigned long lastWateringTime = 0;
-const unsigned long wateringInterval = 6 * 60 * 60; // 6 Stunden in Sekunden
-bool thresholdCrossed = false;
+/********* Time-CONFIGURATION ***********/
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600);
+unsigned long lastIrrigationMillis = 0;
+const unsigned long delayBetweenCycles = 8UL * 60 * 60 * 1000; // 8 Hours
 
+/********* Objekte *********/
+WiFiClient client;
+Adafruit_8x16matrix matrix = Adafruit_8x16matrix();
+
+/********* Setup *********/
 void setup() {
-  Serial.begin(115200);
-  espSerial.begin(115200);
-  
+  Serial.begin(115200); 
   pinMode(pumpPin, OUTPUT);
   digitalWrite(pumpPin, LOW);
+  WiFi.setHostname("<Hostname-for-Wifi>");
 
-  Serial.println("Setup complete.");
+  connectToWiFi();
+  timeClient.begin();
+  timeClient.update();
 }
 
+/********* Loop *********/
 void loop() {
-  checkMoisture();
-  checkForManualCommand();
-  delay(5000); // 5 Sekunden Pause zwischen den Überprüfungen
+  if (!timeClient.update()) {
+    timeClient.forceUpdate();
+  }
+  checkAndIrrigate();
+  delay(5000); // zyklisch alle 5 Sekunden prüfen
 }
 
-void checkMoisture() {
-  Serial.println("Starting moisture check...");
-  
-  int totalMoisture = 0;
-  for (int i = 0; i < 6; i++) {
-    Serial.print("Reading moisture sensor ");
-    Serial.println(i);
-    int moistureValue = analogRead(moisturePins[i]);
-    Serial.print("Moisture Sensor ");
-    Serial.print(i);
-    Serial.print(": ");
-    Serial.println(moistureValue);
-    totalMoisture += moistureValue;
+/********* WiFi-Verbindung herstellen *********/
+void connectToWiFi() {
+  Serial.println("Verbinde mit WiFi...");
+  WiFi.begin(ssid, password);
 
-    // Daten an ESP01 senden
-    espSerial.print("Moisture_Sensor_");
-    espSerial.print(i);
-    espSerial.print(":");
-    espSerial.println(moistureValue);
-  }
-  
-  int averageMoisture = totalMoisture / 6;
-  Serial.print("Average Moisture: ");
-  Serial.println(averageMoisture);
-
-  espSerial.print("Average_Moisture:");
-  espSerial.println(averageMoisture);
-
-  if (averageMoisture > threshold) { // Geändert zu ">"
-    thresholdCrossed = true;
-    checkAndActivatePump();
-  } else {
-    thresholdCrossed = false;
-    Serial.println("Average moisture level below threshold.");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
 
-  if (thresholdCrossed) {
-    checkWateringInterval();
+  Serial.println("\nWiFi verbunden!");
+  Serial.print("IP-Adresse: ");
+  Serial.println(WiFi.localIP());
+}
+
+/********* Hauptfunktion zur Bewässerungslogik *********/
+void checkAndIrrigate() {
+  int sum = 0;
+  int moistureValues[numSensors];
+  for (int i = 0; i < numSensors; i++) {
+    moistureValues[i] = analogRead(moisturePins[i]);
+    sum += moistureValues[i];
   }
-}
+  int average = sum / numSensors;
 
-void checkAndActivatePump() {
-  Serial.println("Threshold crossed. Activating pump immediately.");
-  activatePump();
-  lastWateringTime = millis() / 1000; // Set the last watering time to now in seconds
-}
+  String status = "warten";
+  String warning = "";
+  bool shouldIrrigate = (average > dryThreshold);
 
-void checkWateringInterval() {
-  unsigned long currentSeconds = millis() / 1000; // Convert milliseconds to seconds
-  unsigned long timeSinceLastWatering = currentSeconds - lastWateringTime;
-  bool isIntervalReached = timeSinceLastWatering >= wateringInterval;
+  if (shouldIrrigate && millis() - lastIrrigationMillis > delayBetweenCycles) {
+    Serial.println("Feuchtigkeit zu gering, Pumpe wird aktiviert...");
+    int before = average;
+    digitalWrite(pumpPin, HIGH);
+    delay(15000); // 15 Sekunden
+    digitalWrite(pumpPin, LOW);
+    delay(2000); // kleine Pause zur Messwertstabilisierung
 
-  if (isIntervalReached) {
-    Serial.println("Watering interval reached after threshold was crossed. Activating pump again...");
-    activatePump();
-    lastWateringTime = currentSeconds;
-  } else {
-    unsigned long timeRemaining = wateringInterval - timeSinceLastWatering;
-    
-    // Convert time remaining to hours, minutes, and seconds
-    unsigned long hoursRemaining = timeRemaining / 3600;
-    unsigned long minutesRemaining = (timeRemaining % 3600) / 60;
-    unsigned long secondsRemaining = timeRemaining % 60;
-
-    Serial.print("Watering interval not reached. Time remaining: ");
-    Serial.print(hoursRemaining);
-    Serial.print("h ");
-    Serial.print(minutesRemaining);
-    Serial.print("m ");
-    Serial.print(secondsRemaining);
-    Serial.println("s");
-  }
-}
-
-void activatePump() {
-  digitalWrite(pumpPin, HIGH);
-  Serial.println("Pump activated.");
-  espSerial.println("PUMP_ACTIVATED");
-  delay(30000); // 30 Sekunden Bewässerung
-  digitalWrite(pumpPin, LOW);
-  Serial.println("Pump deactivated.");
-  espSerial.println("PUMP_DEACTIVATED");
-}
-
-void checkForManualCommand() {
-  if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-    if (command == "start_pump") {
-      Serial.println("Manual command received: start_pump");
-      activatePump();
+    sum = 0;
+    for (int i = 0; i < numSensors; i++) {
+      moistureValues[i] = analogRead(moisturePins[i]);
+      sum += moistureValues[i];
     }
+    average = sum / numSensors;
+
+    if (average > wetThreshold) {
+      warning = "Warnung: wahrscheinlich Kanister leer";
+      status = "warnung";
+    } else {
+      lastIrrigationMillis = millis();
+      status = "giessen";
+    }
+  }
+
+  sendJSON(moistureValues, average, status, warning);
+}
+
+/********* JSON an Zabbix und ggf. HTTP-Client senden *********/
+void sendJSON(int values[], int average, const String& status, const String& warning) {
+  DynamicJsonDocument doc(1024);
+  doc["status"] = status;
+  doc["average"] = average;
+  JsonArray sensors = doc.createNestedArray("sensors");
+  for (int i = 0; i < numSensors; i++) {
+    sensors.add(values[i]);
+  }
+  if (warning != "") {
+    doc["warning"] = warning;
+  }
+  doc["last_irrigation"] = String(timeClient.getFormattedTime());
+
+  String json;
+  serializeJson(doc, json);
+  Serial.println(json);
+  sendToZabbix(doc);
+}
+
+/********* Funktion zum Senden von Daten an Zabbix *********/
+void sendToZabbix(DynamicJsonDocument& jsonDoc) {
+  if (client.connect(zabbixServer, zabbixPort)) {
+    String payloadJson;
+    serializeJson(jsonDoc, payloadJson);
+
+    // Trapper-kompatibles JSON aufbauen
+    DynamicJsonDocument wrapper(1024);
+    wrapper["request"] = "sender data";
+    JsonArray data = wrapper.createNestedArray("data");
+
+    JsonObject item = data.createNestedObject();
+    item["host"] = zabbixHost;               // Name exakt wie im Zabbix-Webinterface
+    item["key"] = "sensor.json";             // Key in Zabbix Item
+    item["value"] = payloadJson;             // JSON als Zeichenkette
+
+    String fullMessage;
+    serializeJson(wrapper, fullMessage);
+
+    const char* zabbixHeader = "ZBXD\x01";
+    uint64_t dataLength = fullMessage.length();
+
+    client.write((const uint8_t*)zabbixHeader, 5);
+    for (int i = 0; i < 8; i++) {
+      client.write((uint8_t)((dataLength >> (i * 8)) & 0xFF));
+    }
+    client.print(fullMessage);
+
+    while (client.connected() && !client.available()) {
+      delay(10);
+    }
+    String response = client.readString();
+    Serial.println("Zabbix Antwort: " + response);
+    client.stop();
+  } else {
+    Serial.println("Verbindung zum Zabbix-Server fehlgeschlagen.");
   }
 }
